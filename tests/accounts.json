@@ -1,0 +1,14 @@
+[
+  {
+    "system_id": "1234567890",
+    "password": "password",
+    "bind_type": "Transceiver",
+    "multipart_strategy": "TLV"
+  },
+  {
+    "system_id": "twitter",
+    "password": "twitter",
+    "bind_type": "Receiver",
+    "multipart_strategy": "TLV"
+  }
+]

@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package data;
+
+enum Charset {
+    ISO_8859_1 = 0;
+    ISO_8859_15 = 1;
+    GSM7 = 2;
+    GSM8 = 3;
+    UTF8 = 4;
+    UCS2 = 5;
+}
+
+message Address {
+    int32 ton = 1;
+    int32 npi = 2;
+    string value = 3;
+}
+
+message Message {
+    string id = 1;
+    Charset charset = 2;
+    bytes text = 3;
+    Address src = 4;
+    Address dest = 5;
+}

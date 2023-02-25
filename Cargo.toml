@@ -1,0 +1,24 @@
+[package]
+name = "smpp2kafka"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+tokio = { version = "1.24.1", features = ["full"] }
+tokio-util = { version = "0.7.4", features= ["codec"] }
+tokio-stream = "0.1.1"
+futures = "0.3.25"
+bytes = "1"
+hex = "0.4.3"
+prost ="0.11.3"
+uuid = { version = "1.2.2", features = ["v4","fast-rng","macro-diagnostics",]}
+serde = { version = "1.0.151", features = ["derive"] }
+serde_json = "1.0.90"
+smpp-codec = {git = "https://github.com/rafal2nowak/smpp-codec", branch="main"}
+rskafka = "0.3.0"
+tracing = "0.1.37"
+tracing-subscriber = "0.3.16"
+
+[build-dependencies]
+prost-build = "0.11.3"
