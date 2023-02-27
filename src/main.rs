@@ -5,15 +5,12 @@ use smpp2kafka::{
     kafka_message_store::{KafkaConfigBuilder, KafkaMessageStore},
     server::{self, ServerConfigBuilder},
 };
-use tokio::{signal, sync::mpsc};
+use tokio::signal;
 
 #[tokio::main]
 async fn main() {
     tracing::subscriber::set_global_default(tracing_subscriber::FmtSubscriber::new()).unwrap();
-    let shutdown_complete = mpsc::channel::<()>(1);
-    let shutdown_complete_tx = shutdown_complete.0.clone();
 
-    let shutdown = signal::ctrl_c();
     let message_store =
         Arc::new(KafkaMessageStore::new(KafkaConfigBuilder::default().build()).await);
     let server_config = Arc::new(ServerConfigBuilder::default().build());
@@ -21,13 +18,5 @@ async fn main() {
         "/Users/rnowak/Projects/rust/smpp2kafka/tests/accounts.json",
     )));
 
-    let _ =server::run(
-        server_config,
-        account_service,
-        message_store,
-        shutdown,
-        shutdown_complete_tx,
-    )
-    .await;
-
+    let _ = server::run(server_config, account_service, message_store, signal::ctrl_c()).await;
 }

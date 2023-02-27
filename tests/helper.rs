@@ -40,7 +40,6 @@ pub async fn start_server(
     start_tracing_if_nneded();
     let tests_path = tests_path();
     let shutdown_complete = mpsc::channel::<()>(1);
-    let shutdown_complete_tx = shutdown_complete.0.clone();
     let server_config = Arc::new(server_config_builder.build());
     let account_service = Arc::new(FileBasedAccountService::new(file_path(
         &tests_path,
@@ -54,7 +53,6 @@ pub async fn start_server(
             account_service,
             message_store,
             shutdown,
-            shutdown_complete_tx,
         )
         .await;
     });

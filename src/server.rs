@@ -11,7 +11,6 @@ use futures::Future;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
-use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::Semaphore;
 use tokio::time;
 use tracing::info;
@@ -22,14 +21,12 @@ pub async fn run(
     config: Arc<ServerConfig>,
     account_service: Arc<dyn AccountService>,
     message_store: Arc<KafkaMessageStore>,
-    shutdown: impl Future + Send + 'static,
-    shutdown_complete: Sender<()>,
+    shutdown_signal: impl Future + Send + 'static,
 ) -> crate::Result<()> {
-    let (notify_shutdown, _) = broadcast::channel::<()>(1);
-    let mut server = Server::new(config, account_service, message_store, notify_shutdown);
+    let mut server = Server::new(config, account_service, message_store);
     tokio::select! {
-        _ = server.run(shutdown_complete.clone()) => {}
-        _ = shutdown => info!("Shutting down")
+        _ = server.run() => {},
+        _ = shutdown_signal => info!("Shutting down signal received")
     }
 
     let Server {
@@ -37,13 +34,17 @@ pub async fn run(
         account_service: _,
         message_store: _,
         connections_limit: _,
-        notify_shutdown,
+        mut notify_shutdown,
         listener: _,
     } = server;
 
-    //TODO: 
-    //drop(notify_shutdown);
-    //drop(shutdown_complete);
+    // notify all session to shutdown 
+    let _ = notify_shutdown.0.send(());
+    let _ = notify_shutdown.1.recv().await;
+
+    // wait until session threads are done
+    drop(notify_shutdown.0);
+    let _ = notify_shutdown.1.recv().await;
 
     info!("Shutdown completed");
     Ok(())
@@ -201,7 +202,7 @@ pub struct Server {
     account_service: Arc<dyn AccountService>,
     message_store: Arc<KafkaMessageStore>,
     connections_limit: Arc<Semaphore>,
-    notify_shutdown: broadcast::Sender<()>,
+    notify_shutdown: (broadcast::Sender<()>, broadcast::Receiver<()>),
     listener: Option<TcpListener>,
 }
 
@@ -210,7 +211,6 @@ impl Server {
         config: Arc<ServerConfig>,
         account_service: Arc<dyn AccountService>,
         message_store: Arc<KafkaMessageStore>,
-        notify_shutdown: broadcast::Sender<()>,
     ) -> Server {
         let max_connections = config.max_connections as usize;
         Server {
@@ -218,12 +218,12 @@ impl Server {
             account_service,
             message_store,
             connections_limit: Arc::new(Semaphore::new(max_connections)),
-            notify_shutdown,
+            notify_shutdown: broadcast::channel::<()>(1),
             listener: None,
         }
     }
 
-    pub async fn run(&mut self, shutdown_complete_tx: mpsc::Sender<()>) -> crate::Result<()> {
+    pub async fn run(&mut self) -> crate::Result<()> {
         self.bind_listener().await?;
 
         loop {
@@ -242,8 +242,8 @@ impl Server {
                 self.account_service.clone(),
                 self.message_store.clone(),
                 self.config.clone(),
-                Shutdown::new(self.notify_shutdown.subscribe()),
-                shutdown_complete_tx.clone(),
+                Shutdown::new(self.notify_shutdown.0.subscribe()),
+                self.notify_shutdown.0.clone(),
             );
             tokio::spawn(async move {
                 session.run(socket).await;

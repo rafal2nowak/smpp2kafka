@@ -9,6 +9,7 @@ use tokio_util::codec::Framed;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
@@ -166,7 +167,7 @@ pub struct Session {
     config: Arc<ServerConfig>,
     bind_timout_task: Option<JoinHandle<()>>,
     shutdown: Shutdown,
-    _shutdown_complete: mpsc::Sender<()>,
+    _notify_shutdown: broadcast::Sender<()>,
 }
 
 impl Session {
@@ -176,7 +177,7 @@ impl Session {
         message_store: Arc<KafkaMessageStore>,
         config: Arc<ServerConfig>,
         shutdown: Shutdown,
-        _shutdown_complete: mpsc::Sender<()>,
+        _notify_shutdown: broadcast::Sender<()>,
     ) -> Self {
         let addr_cloned = addr.clone();
         Self {
@@ -195,7 +196,7 @@ impl Session {
             config,
             bind_timout_task: None,
             shutdown,
-            _shutdown_complete,
+            _notify_shutdown,
         }
     }
 
@@ -241,13 +242,9 @@ impl Session {
             }
         }
         self.bind_healtcheck.stop();
-        match pdu_frames.close().await {
-            Ok(_) => info!("[{}|{}] Conncetion closed", self.addr, self.session_id),
-            Err(e) => warn!(
-                "[{}|{}] Conncetion closed with error: {:?} ",
-                self.addr, self.session_id, e
-            ),
-        }
+        let _ =  pdu_frames.close().await;
+        
+        info!("[{}|{}] Session closed", self.addr, self.session_id);
     }
 
     async fn process_received_pdu(&mut self, pdu: &Pdu) -> Option<Pdu> {
@@ -370,6 +367,7 @@ impl Session {
                         self.addr.clone(),
                         self.session_id.clone(),
                     );
+                    info!("[{}|{}] Session created", self.addr, self.session_id);
                     response_pdu(ESME_ROK)
                 }
             }
