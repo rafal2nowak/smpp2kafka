@@ -38,23 +38,13 @@ pub async fn start_server(
     shutdown: impl Future + Send + Clone + 'static,
 ) -> (Sender<()>, Receiver<()>) {
     start_tracing_if_nneded();
-    let tests_path = tests_path();
     let shutdown_complete = mpsc::channel::<()>(1);
     let server_config = Arc::new(server_config_builder.build());
-    let account_service = Arc::new(FileBasedAccountService::new(file_path(
-        &tests_path,
-        ACCOUNTS_FILE_NAME,
-    )));
+    let account_service = Arc::new(FileBasedAccountService::new(String::from(ACCOUNTS_FILE_NAME)));
     let message_store =
         Arc::new(KafkaMessageStore::new(KafkaConfigBuilder::default().build()).await);
     tokio::spawn(async move {
-        let _ = server::run(
-            server_config,
-            account_service,
-            message_store,
-            shutdown,
-        )
-        .await;
+        let _ = server::run(server_config, account_service, message_store, shutdown).await;
     });
     shutdown_complete
 }
@@ -95,12 +85,6 @@ fn file_path(root_path: &PathBuf, file_name: &str) -> String {
             root_path.as_os_str()
         ))
         .to_owned()
-}
-
-fn tests_path() -> PathBuf {
-    let mut p = std::env::current_dir().unwrap();
-    p.push("tests");
-    p
 }
 
 #[derive(Debug, Clone)]
