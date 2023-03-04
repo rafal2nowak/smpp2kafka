@@ -39,16 +39,16 @@ enum Event {
 }
 
 impl From<SmppCodecError> for Event {
-    fn from(v: SmppCodecError) -> Self {
-        match v {
-            SmppCodecError::ParseError(parse_err) => match parse_err {
-                smpp_codec::pdu::ParseError::InvalidCommand(_) => todo!(),
-                smpp_codec::pdu::ParseError::InvalidCOctetString(_) => todo!(),
-                smpp_codec::pdu::ParseError::InvalidTlv(_) => todo!(),
-                smpp_codec::pdu::ParseError::PduMaxLengthExceeded(_) => todo!(),
-                smpp_codec::pdu::ParseError::InvalidSequenceNumber(_) => todo!(),
-            },
-            SmppCodecError::IoError(err_str) => Self::Error(Error::Io(err_str)),
+    fn from(err: SmppCodecError) -> Self {
+        Self::Error(Error::from(err))
+    }
+}
+
+impl From<SmppCodecError> for Error {
+    fn from(err: SmppCodecError) -> Self {
+        match err {
+            SmppCodecError::IoError(err_str) => Error::Io(err_str),
+            parse_err => Error::InvalidPdu(parse_err),
         }
     }
 }
@@ -59,6 +59,7 @@ enum Error {
     InvalidBindRequest(BindType), //ESME requested bind with type different than was provisioned
     BindTimeout,
     Io(String),
+    InvalidPdu(SmppCodecError),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -242,8 +243,8 @@ impl Session {
             }
         }
         self.bind_healtcheck.stop();
-        let _ =  pdu_frames.close().await;
-        
+        let _ = pdu_frames.close().await;
+
         info!("[{}|{}] Session closed", self.addr, self.session_id);
     }
 
