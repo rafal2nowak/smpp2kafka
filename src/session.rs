@@ -31,34 +31,27 @@ use smpp_codec::pdu::{
 const UNBOUND: &str = "UNBOUND";
 
 #[derive(Debug, Clone)]
-enum Event {
-    Received(Pdu),
-    ToSend(Pdu),
-    Error(Error),
-    Shutdown,
+enum Command {
+    Send(Pdu),
+    Consume(Pdu),
+    Shutdown(Option<SessionError>),
 }
 
-impl From<SmppCodecError> for Event {
-    fn from(err: SmppCodecError) -> Self {
-        Self::Error(Error::from(err))
-    }
-}
-
-impl From<SmppCodecError> for Error {
+impl From<SmppCodecError> for SessionError {
     fn from(err: SmppCodecError) -> Self {
         match err {
-            SmppCodecError::IoError(err_str) => Error::Io(err_str),
-            parse_err => Error::InvalidPdu(parse_err),
+            SmppCodecError::IoError(err_str) => SessionError::ConnectionError(err_str),
+            parse_err => SessionError::InvalidPdu(parse_err),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-enum Error {
+enum SessionError {
     EnquireLinkWithoutResp(i32),
     InvalidBindRequest(BindType), //ESME requested bind with type different than was provisioned
     BindTimeout,
-    Io(String),
+    ConnectionError(String),
     InvalidPdu(SmppCodecError),
 }
 
@@ -105,7 +98,7 @@ impl BindHealthCheck {
         }
     }
 
-    fn start(&mut self, tx: UnboundedSender<Event>, addr: String, session_id: String) {
+    fn start(&mut self, tx: UnboundedSender<Command>, addr: String, session_id: String) {
         self.session_id = session_id.clone();
         let el_pdu = |seq: u32| -> Pdu {
             Pdu::new(
@@ -118,7 +111,7 @@ impl BindHealthCheck {
                 Body::EnquireLink,
             )
         };
-        let error = Error::EnquireLinkWithoutResp;
+        let error = SessionError::EnquireLinkWithoutResp;
 
         let el_pending_count = self.el_pending_count.clone();
         let el_pending_max = self.config.enquire_link_pending_max;
@@ -135,9 +128,9 @@ impl BindHealthCheck {
                 sequence_number += 1;
 
                 let e = if el_pending_count.fetch_add(1, Ordering::SeqCst) <= (el_pending_max + 1) {
-                    Event::ToSend(el_pdu(sequence_number))
+                    Command::Send(el_pdu(sequence_number))
                 } else {
-                    Event::Error(error(el_pending_count.load(Ordering::SeqCst)))
+                    Command::Shutdown(Some(error(el_pending_count.load(Ordering::SeqCst))))
                 };
                 send_to_pdu_to_be_send_channel(addr.clone(), session_id.clone(), tx.clone(), e);
             }
@@ -162,7 +155,7 @@ pub struct Session {
     bind_type: Option<BindType>,
     account: Option<Account>,
     bind_healtcheck: BindHealthCheck,
-    pdu_to_be_send: (UnboundedSender<Event>, UnboundedReceiver<Event>),
+    pdu_to_be_send: (UnboundedSender<Command>, UnboundedReceiver<Command>),
     account_service: Arc<dyn AccountService>,
     message_store: Arc<KafkaMessageStore>,
     config: Arc<ServerConfig>,
@@ -205,40 +198,40 @@ impl Session {
         self.start_bind_timeout_task();
         let mut pdu_frames = Framed::new(socket, PduCodec::default());
 
-        let to_event = |r: Option<Result<Pdu, SmppCodecError>>| {
+        let to_command = |r: Option<Result<Pdu, SmppCodecError>>| {
             r.map(|x| match x {
-                Ok(pdu) => Event::Received(pdu),
-                Err(e) => e.into(),
+                Ok(pdu) => Command::Consume(pdu),
+                Err(e) => Command::Shutdown(Some(e.into())),
             })
         };
 
         loop {
-            if let Some(event) = tokio::select! {
-                r = pdu_frames.next() => to_event(r),
+            if let Some(command) = tokio::select! {
+                r = pdu_frames.next() => to_command(r),
                 r = self.pdu_to_be_send.1.recv() => r,
-                _ = self.shutdown.recv() => Some(Event::Shutdown),
+                _ = self.shutdown.recv() => Some(Command::Shutdown(None)),
             } {
-                match event {
-                    Event::Received(pdu) => {
+                match command {
+                    Command::Consume(pdu) => {
                         if let Some(pdu_resp) = self.process_received_pdu(&pdu).await {
                             if (pdu_frames.send(pdu_resp).await).is_err() {
                                 break;
                             }
                         }
                     }
-                    Event::ToSend(pdu) => {
+                    Command::Send(pdu) => {
                         if (pdu_frames.send(pdu).await).is_err() {
                             break;
                         }
                     }
-                    Event::Error(e) => {
+                    Command::Shutdown(None) => break,
+                    Command::Shutdown(Some(e)) => {
                         error!(
                             "[{}|{}] {:?}, closing connection",
                             self.addr, self.session_id, e
                         );
                         break;
                     }
-                    Event::Shutdown => break,
                 }
             }
         }
@@ -350,7 +343,7 @@ impl Session {
                         self.addr.clone(),
                         self.session_id.clone(),
                         self.pdu_to_be_send.0.clone(),
-                        Event::Error(Error::InvalidBindRequest(bind_type)),
+                        Command::Shutdown(Some(SessionError::InvalidBindRequest(bind_type))),
                     );
                     response_pdu(ESME_RBINDFAIL) // Binding failed
                 } else if account.password != bind.password {
@@ -396,7 +389,12 @@ impl Session {
         let tx = self.pdu_to_be_send.0.clone();
         let task = tokio::spawn(async move {
             sleep(Duration::from_secs(bind_timeout_sec)).await;
-            send_to_pdu_to_be_send_channel(addr, session_id, tx, Event::Error(Error::BindTimeout));
+            send_to_pdu_to_be_send_channel(
+                addr,
+                session_id,
+                tx,
+                Command::Shutdown(Some(SessionError::BindTimeout)),
+            );
         });
         self.bind_timout_task = Some(task);
     }
