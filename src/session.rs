@@ -1,3 +1,4 @@
+use core::panic;
 use futures::SinkExt;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -155,13 +156,13 @@ pub struct Session {
     bind_type: Option<BindType>,
     account: Option<Account>,
     bind_healtcheck: BindHealthCheck,
-    pdu_to_be_send: (UnboundedSender<Command>, UnboundedReceiver<Command>),
+    command_to_execute: (UnboundedSender<Command>, UnboundedReceiver<Command>),
     account_service: Arc<dyn AccountService>,
     message_store: Arc<KafkaMessageStore>,
     config: Arc<ServerConfig>,
     bind_timout_task: Option<JoinHandle<()>>,
-    shutdown: Shutdown,
-    _notify_shutdown: broadcast::Sender<()>,
+    server_shutdown: Shutdown,
+    _notify_server_shutdown: broadcast::Sender<()>,
 }
 
 impl Session {
@@ -170,8 +171,8 @@ impl Session {
         account_service: Arc<dyn AccountService>,
         message_store: Arc<KafkaMessageStore>,
         config: Arc<ServerConfig>,
-        shutdown: Shutdown,
-        _notify_shutdown: broadcast::Sender<()>,
+        server_shutdown: Shutdown,
+        _notify_server_shutdown: broadcast::Sender<()>,
     ) -> Self {
         let addr_cloned = addr.clone();
         Self {
@@ -184,13 +185,13 @@ impl Session {
                 String::from(UNBOUND),
                 config.clone(),
             ),
-            pdu_to_be_send: mpsc::unbounded_channel(),
+            command_to_execute: mpsc::unbounded_channel(),
             account_service,
             message_store,
             config,
             bind_timout_task: None,
-            shutdown,
-            _notify_shutdown,
+            server_shutdown: server_shutdown,
+            _notify_server_shutdown: _notify_server_shutdown,
         }
     }
 
@@ -208,14 +209,22 @@ impl Session {
         loop {
             if let Some(command) = tokio::select! {
                 r = pdu_frames.next() => to_command(r),
-                r = self.pdu_to_be_send.1.recv() => r,
-                _ = self.shutdown.recv() => Some(Command::Shutdown(None)),
+                r = self.command_to_execute.1.recv() => r,
+                _ = self.server_shutdown.recv() => Some(Command::Shutdown(None)),
             } {
                 match command {
                     Command::Consume(pdu) => {
-                        if let Some(pdu_resp) = self.process_received_pdu(&pdu).await {
-                            if (pdu_frames.send(pdu_resp).await).is_err() {
-                                break;
+                        if let Some(resp_command) = self.process_received_pdu(&pdu).await {
+                            match resp_command {
+                                Command::Send(pdu_resp) => {
+                                    if (pdu_frames.send(pdu_resp).await).is_err() {
+                                        break;
+                                    }
+                                }
+                                Command::Shutdown(_) => break,
+                                cmd => {
+                                    panic!("Session::process_received_pdu can't return {:?}", cmd)
+                                }
                             }
                         }
                     }
@@ -241,22 +250,24 @@ impl Session {
         info!("[{}|{}] Session closed", self.addr, self.session_id);
     }
 
-    async fn process_received_pdu(&mut self, pdu: &Pdu) -> Option<Pdu> {
+    async fn process_received_pdu(&mut self, pdu: &Pdu) -> Option<Command> {
         match &pdu.body {
-            Body::Bind(bind) => Some(self.on_bind(&pdu.header, bind)),
+            Body::Bind(bind) => Some(Command::Send(self.on_bind(&pdu.header, bind))),
 
-            Body::EnquireLink => Some(self.on_enquire_link(&pdu.header)),
+            Body::EnquireLink => Some(Command::Send(self.on_enquire_link(&pdu.header))),
             Body::EnquireLinkResp => {
                 self.on_enquire_link_resp();
                 None
             }
-            Body::SubmitSm(sm_data) => Some(self.on_submit_sm(&pdu.header, sm_data).await),
+            Body::SubmitSm(sm_data) => {
+                Some(Command::Send(self.on_submit_sm(&pdu.header, sm_data).await))
+            }
 
             Body::DeliverSmResp(_) => {
                 None // TODO: implement
             }
             Body::Unbind => todo!(),
-            Body::UnbindResp => todo!(),
+            Body::UnbindResp => Some(Command::Shutdown(None)),
             Body::Nack => todo!(),
             _ => {
                 warn!(
@@ -342,7 +353,7 @@ impl Session {
                     send_to_pdu_to_be_send_channel(
                         self.addr.clone(),
                         self.session_id.clone(),
-                        self.pdu_to_be_send.0.clone(),
+                        self.command_to_execute.0.clone(),
                         Command::Shutdown(Some(SessionError::InvalidBindRequest(bind_type))),
                     );
                     response_pdu(ESME_RBINDFAIL) // Binding failed
@@ -357,7 +368,7 @@ impl Session {
                         self.bind_type.as_ref().unwrap(),
                     );
                     self.bind_healtcheck.start(
-                        self.pdu_to_be_send.0.clone(),
+                        self.command_to_execute.0.clone(),
                         self.addr.clone(),
                         self.session_id.clone(),
                     );
@@ -386,7 +397,7 @@ impl Session {
         let session_id = self.session_id.clone();
         let addr = self.addr.clone();
         let bind_timeout_sec = self.config.bind_timeout_sec;
-        let tx = self.pdu_to_be_send.0.clone();
+        let tx = self.command_to_execute.0.clone();
         let task = tokio::spawn(async move {
             sleep(Duration::from_secs(bind_timeout_sec)).await;
             send_to_pdu_to_be_send_channel(
